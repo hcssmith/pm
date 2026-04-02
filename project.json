@@ -1,0 +1,30 @@
+{
+  "name": "Example Project",
+  "source": "./src",
+  "artifact_dir": "./output",
+  "actions": {
+    "build": {
+      "type":"native",
+      "steps": [
+        "echo test",
+        "ls"
+      ],
+      "artifacts": [
+        "t1"
+      ]
+    },
+    "docker-build": {
+      "type": "docker",
+      "image": "golang:1.25.7",
+      "workdir": "/src",
+      "steps": [
+        "COPY go.mod ./",
+        "RUN go mod download"
+      ],
+      "cmd":"go build -o app",
+      "artifacts": [
+        "app"
+      ]
+    }
+  }
+}
