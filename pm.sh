@@ -21,29 +21,41 @@ src=$(jq -r ".source" "$PROJECT_FILE")
 artifact_dir=$(jq -r ".artifact_dir" "$PROJECT_FILE")
 name=$(jq -r ".name" "$PROJECT_FILE")
 
+copy_artifacts() {
+  local base_dir="$1"
+  shift
+  local artifacts=("$@")
+
+  if [[ ${#artifacts[@]} -gt 0 ]]; then
+    mkdir -p "$artifact_dir"
+    for artifact in "${artifacts[@]}"; do
+      echo "==> Copying artifact: $artifact"
+      cp -r "$base_dir/$artifact" "$artifact_dir/"
+    done
+  fi
+}
+
+
 run_native() {
 	config=$1
 	artifact_dir=$(jq -r ".artifact_dir" "$PROJECT_FILE")
 
 	mapfile -t steps < <(echo "$config" | jq -r ".steps[]")
-	mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[] // empty")
+  local artifacts=()
+	mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[]? // empty")
 
   echo "=> Running Native Action" 
   echo "==> Building"
-	cd "$src"
+	pushd "$src" > /dev/null
 	for step in "${steps[@]}"; do
 		echo "-> $step"
 		bash -c "$step"
 	done
-	cd - >/dev/null
-  echo "=> Copying Artifacts"
-	if [[ ${#artifacts[@]} -gt 0 ]]; then
-		mkdir -p "$artifact_dir"
-		for artifact in "${artifacts[@]}"; do
-			echo "==> Copying artifact: $artifact"
-			cp -r "$src/$artifact" "$artifact_dir/"
-		done
-	fi
+	popd >/dev/null
+
+  if [[ ${#artifacts[@]} -gt 0 ]]; then
+    copy_artifacts $src $artifacts
+  fi
 }
 
 run_docker() {
@@ -51,10 +63,10 @@ run_docker() {
   local workdir tag dockerfile cmd
   workdir=$(echo "$config" | jq -r ".workdir")
   cmd=$(echo "$config" | jq -r ".cmd")
-  mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[] // empty")
+  local artifacts=()
+  mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[]? // empty")
   tag=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
   dockerfile=$(mktemp)
-  trap 'rm -f "$dockerfile"' RETURN
   echo "==> Generating Dockerfile"
 
   {
@@ -67,7 +79,9 @@ run_docker() {
   
   docker build -f "$dockerfile" -t "$tag-builder" "$src"
 
-  docker run --rm \
+  rm "$dockerfile"
+
+  docker run --rm -i \
     -u "$(id -u):$(id -g)" \
     -v "$src:$workdir" \
     -w "$workdir" \
@@ -76,14 +90,9 @@ run_docker() {
     "$tag-builder" \
     bash -c "$cmd"
   
-  echo "=> Copying Artifacts"
-	if [[ ${#artifacts[@]} -gt 0 ]]; then
-		mkdir -p "$artifact_dir"
-		for artifact in "${artifacts[@]}"; do
-			echo "==> Copying artifact: $artifact"
-			cp -r "$src/$artifact" "$artifact_dir/"
-		done
-	fi
+  if [[ ${#artifacts[@]} -gt 0 ]]; then
+    copy_artifacts "$src" $artifacts
+  fi
 
 }
 
