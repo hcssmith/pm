@@ -59,13 +59,29 @@ run_native() {
 }
 
 run_docker() {
-  local config=$1
+  local action=$1
+  local config=$2
   local workdir tag dockerfile cmd
   workdir=$(echo "$config" | jq -r ".workdir")
   cmd=$(echo "$config" | jq -r ".cmd")
   local artifacts=()
   mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[]? // empty")
   tag=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+  # Parse cache_volumes into mount strings (before Dockerfile generation)
+  local vol_mounts=()
+  mapfile -t vol_mounts < <(echo "$config" | jq -r --arg tag "$tag" \
+    '.cache_volumes | to_entries[] | "pm-\($tag)__\(.key):\(.value)"')
+
+  local vol_args=()
+  for m in "${vol_mounts[@]}"; do
+    vol_args+=(-v "$m")
+  done
+
+  # Extract container paths for Dockerfile mkdir
+  local cache_paths=()
+  mapfile -t cache_paths < <(echo "$config" | jq -r '.cache_volumes | to_entries[] | .value')
+
   dockerfile=$(mktemp)
   echo "==> Generating Dockerfile"
 
@@ -73,22 +89,63 @@ run_docker() {
     echo "FROM $(echo "$config" | jq -r ".image")"
     echo "WORKDIR $(echo "$config" | jq -r ".workdir")"
 
+    # Ensure cache volume dirs exist with open permissions
+    for p in "${cache_paths[@]}"; do
+      echo "RUN mkdir -p '$p' && chmod a+rw '$p'"
+    done
+
     echo "$config" | jq -r ".steps[]"
 
   } > "$dockerfile"
   
-  docker build -f "$dockerfile" -t "$tag-builder" "$src"
+  docker build --provenance=false -f "$dockerfile" -t "$tag-builder" "$src"
 
   rm "$dockerfile"
 
-  docker run --rm -i \
+  # Parse env vars from config
+  local env_args=()
+  mapfile -t env_entries < <(echo "$config" | jq -r '.env | to_entries[] | "\(.key)=\(.value)"')
+  for e in "${env_entries[@]}"; do
+    env_args+=(-e "$e")
+  done
+
+  # Image change detection via fingerprint
+  local new_image_id
+  new_image_id=$(docker inspect --format='{{.Id}}' "$tag-builder")
+
+  local cache_dir=".pm-cache"
+  local fp_file="$cache_dir/${action}.fingerprint"
+  mkdir -p "$cache_dir"
+
+  if [[ -f "$fp_file" ]]; then
+    local old_image_id
+    old_image_id=$(cat "$fp_file")
+    if [[ "$old_image_id" != "$new_image_id" ]]; then
+      echo "==> Image changed, invalidating cache volumes"
+      for m in "${vol_mounts[@]}"; do
+        local vol_name="${m%%:*}"
+        echo "  Removing volume: $vol_name"
+        docker volume rm "$vol_name" 2>/dev/null || true
+      done
+    fi
+  fi
+
+  local tty_flag=''
+  if echo "$config" | jq -e '.interactive' >/dev/null 2>&1; then
+    tty_flag='-t'
+  fi
+
+  docker run --rm -i $tty_flag \
     -u "$(id -u):$(id -g)" \
     -v "$src:$workdir" \
+    "${vol_args[@]}" \
+    "${env_args[@]}" \
     -w "$workdir" \
-    -e GOCACHE=/tmp/go-build \
-    -e GOMODCACHE=/tmp/go-mod \
     "$tag-builder" \
     bash -c "$cmd"
+
+  # Only save fingerprint after successful build
+  echo "$new_image_id" > "$fp_file"
   
   if [[ ${#artifacts[@]} -gt 0 ]]; then
     copy_artifacts "$src" $artifacts
@@ -110,7 +167,7 @@ run_action() {
 		run_native "$config"
 		;;
 	docker)
-		run_docker "$config"
+		run_docker "$action_name" "$config"
 		;;
 	esac
 }

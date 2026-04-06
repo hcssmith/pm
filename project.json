@@ -10,7 +10,7 @@
         "ls"
       ],
       "artifacts": [
-        "t1"
+        "main.go"
       ]
     },
     "docker-build": {
@@ -21,10 +21,37 @@
         "COPY go.mod ./",
         "RUN go mod download"
       ],
-      "cmd":"go build -o app",
+      "cache_volumes": {
+        "build_cache":"/tmp/go-build",
+        "mod_cache":"/tmp/go-mod"
+      },
+      "env": {
+        "GOCACHE":"/tmp/go-build",
+        "GOMODCACHE":"/tmp/go-mod"
+      },
+      "cmd":"go build -o app .",
       "artifacts": [
         "app"
       ]
+    },
+    "develop": {
+      "type": "docker",
+      "image": "golang:1.25.7",
+      "workdir": "/src",
+      "steps": [
+        "COPY go.mod ./",
+        "RUN go mod download"
+      ],
+      "cache_volumes": {
+        "build_cache": "/tmp/go-build",
+        "mod_cache": "/tmp/go-mod"
+      },
+      "env": {
+        "GOCACHE": "/tmp/go-build",
+        "GOMODCACHE": "/tmp/go-mod"
+      },
+      "cmd": "bash",
+      "interactive": true
     }
   }
 }
