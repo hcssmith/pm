@@ -11,12 +11,7 @@ if [[ -z "$action" ]]; then
 	exit 1
 fi
 
-# Check action exists
-if ! jq -e ".actions | has(\"$action\")" "$PROJECT_FILE" >/dev/null; then
-	echo "Action '$action' not found"
-	exit 1
-fi
-
+# Resolve shared fields
 src=$(jq -r ".source" "$PROJECT_FILE")
 artifact_dir=$(jq -r ".artifact_dir" "$PROJECT_FILE")
 name=$(jq -r ".name" "$PROJECT_FILE")
@@ -153,6 +148,88 @@ run_docker() {
 
 }
 
+run_agent() {
+  local config
+  config=$(jq '.agent' "$PROJECT_FILE")
+
+  local base_image
+  base_image=$(echo "$config" | jq -r '.base_image // "pi-agent"')
+  local tag
+  tag=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+  # Handle custom instructions — file path or raw text
+  local instructions cleanup_file=''
+  instructions=$(echo "$config" | jq -r '.instructions // empty')
+  local instructions_copy=''
+  if [[ -n "$instructions" ]]; then
+    if [[ -f "$instructions" ]]; then
+      # It's a file path — copy into build context so Docker can access it
+      cleanup_file="$(mktemp -p "$src" tmp.agent.instructions.XXXXXX.md)"
+      cp "$(readlink -f "$instructions")" "$cleanup_file"
+      instructions_copy="COPY ${cleanup_file##*/} /home/pi/.pi/agent/AGENTS.md"
+    else
+      # It's raw text — write to temp file in build context
+      cleanup_file="$(mktemp -p "$src" tmp.agent.instructions.XXXXXX.md)"
+      echo "$instructions" > "$cleanup_file"
+      instructions_copy="COPY ${cleanup_file##*/} /home/pi/.pi/agent/AGENTS.md"
+    fi
+  fi
+
+  local dockerfile
+  dockerfile=$(mktemp)
+  echo "==> Generating agent Dockerfile"
+
+  {
+    echo "FROM $base_image"
+    echo "USER root"
+    echo "$config" | jq -r '.steps[]'
+    if [[ -n "$instructions_copy" ]]; then
+      echo "$instructions_copy"
+      echo "RUN chown pi:pi /home/pi/.pi/agent/AGENTS.md"
+    fi
+    echo "USER pi"
+  } > "$dockerfile"
+
+  echo "==> Building agent image"
+  docker build --provenance=false -f "$dockerfile" -t "$tag-agent" "$src"
+  rm "$dockerfile"
+  # Clean up temp instructions file if we created one
+  if [[ -n "$cleanup_file" ]]; then
+    rm -f "$cleanup_file"
+  fi
+
+  echo "==> Launching agent container"
+
+  # Build volume mounts
+  local vol_args=("-v" "$src:/app")
+
+  # Named volume for persistent sessions (scoped per project)
+  vol_args+=("-v" "pm-${tag}__sessions:/home/pi/.pi/agent/sessions")
+
+  # Mount models.json if it exists (read-only)
+  local models_json="$HOME/.pi/agent/models.json"
+  if [[ -f "$models_json" ]]; then
+    vol_args+=("-v" "$models_json:/home/pi/.pi/agent/models.json:ro")
+  fi
+
+  # Pass through API key env vars if set
+  local env_args=()
+  for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY; do
+    if [[ -n "${!var:-}" ]]; then
+      env_args+=("-e" "${var}=${!var}")
+    fi
+  done
+
+  clear
+
+  docker run -it --rm --init \
+    --name "$tag-agent" \
+    "${vol_args[@]}" \
+    "${env_args[@]}" \
+    -e "TERM=${TERM:-xterm-256color}" \
+    "$tag-agent"
+}
+
 run_action() {
 	local action_name="$1"
 
@@ -172,4 +249,12 @@ run_action() {
 	esac
 }
 
-run_action "$action"
+# Dispatch
+if [[ "$action" == "agent" ]] && jq -e 'has("agent")' "$PROJECT_FILE" >/dev/null; then
+	run_agent
+elif jq -e ".actions | has(\"$action\")" "$PROJECT_FILE" >/dev/null; then
+	run_action "$action"
+else
+	echo "Action '$action' not found"
+	exit 1
+fi

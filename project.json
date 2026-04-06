@@ -2,6 +2,13 @@
   "name": "Example Project",
   "source": "./src",
   "artifact_dir": "./output",
+  "agent": {
+    "steps": [
+      "COPY --from=golang:1.25.7-alpine /usr/local/go/ /usr/local/go/",
+      "ENV PATH=\"/usr/local/go/bin:${PATH}\""
+    ],
+    "instructions": "AGENTS.md"
+  },
   "actions": {
     "build": {
       "type":"native",
