@@ -10,15 +10,11 @@
     "instructions": "AGENTS.md"
   },
   "actions": {
-    "build": {
+    "install": {
       "type":"native",
-      "description": "Native echo test",
+      "description": "Install pm.sh to ~/.local/bin",
       "steps": [
-        "echo test",
-        "ls"
-      ],
-      "artifacts": [
-        "main.go"
+        "install -D -m 755 ../pm.sh ~/.local/bin/pm"
       ]
     },
     "docker-build": {
