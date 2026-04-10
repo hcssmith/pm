@@ -8,8 +8,24 @@ action="${1:-}"
 
 if [[ -z "$action" ]]; then
 	echo "Usage: $0 <action>"
+	echo ""
+	echo "Special commands:"
+	echo "  list    Show available actions"
+	echo "  agent   Launch AI dev agent (if configured)"
+	echo ""
+	echo "Run '$0 list' to see all project actions."
 	exit 1
 fi
+
+# field validation
+
+for field in "name" "source" "artifact_dir"; do
+  val=$(jq -r ".$field" "$PROJECT_FILE")
+  if [[ "$val" == "null" || -z "$val" ]]; then
+    echo "$field not set"
+    exit 1
+  fi
+done
 
 # Resolve shared fields
 src=$(jq -r ".source" "$PROJECT_FILE")
@@ -33,8 +49,6 @@ copy_artifacts() {
 
 run_native() {
 	config=$1
-	artifact_dir=$(jq -r ".artifact_dir" "$PROJECT_FILE")
-
 	mapfile -t steps < <(echo "$config" | jq -r ".steps[]")
   local artifacts=()
 	mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[]? // empty")
@@ -49,7 +63,7 @@ run_native() {
 	popd >/dev/null
 
   if [[ ${#artifacts[@]} -gt 0 ]]; then
-    copy_artifacts $src $artifacts
+    copy_artifacts "$src" "${artifacts[@]}"
   fi
 }
 
@@ -59,6 +73,12 @@ run_docker() {
   local workdir tag dockerfile cmd
   workdir=$(echo "$config" | jq -r ".workdir")
   cmd=$(echo "$config" | jq -r ".cmd")
+  if [[ -z "$cmd" ]]; then
+    echo "No command Specified"
+    exit 1
+  fi
+
+
   local artifacts=()
   mapfile -t artifacts < <(echo "$config" | jq -r ".artifacts[]? // empty")
   tag=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
@@ -66,7 +86,7 @@ run_docker() {
   # Parse cache_volumes into mount strings (before Dockerfile generation)
   local vol_mounts=()
   mapfile -t vol_mounts < <(echo "$config" | jq -r --arg tag "$tag" \
-    '.cache_volumes | to_entries[] | "pm-\($tag)__\(.key):\(.value)"')
+    '.cache_volumes // {} | to_entries[] | "pm-\($tag)__\(.key):\(.value)"')
 
   local vol_args=()
   for m in "${vol_mounts[@]}"; do
@@ -75,7 +95,7 @@ run_docker() {
 
   # Extract container paths for Dockerfile mkdir
   local cache_paths=()
-  mapfile -t cache_paths < <(echo "$config" | jq -r '.cache_volumes | to_entries[] | .value')
+  mapfile -t cache_paths < <(echo "$config" | jq -r '.cache_volumes // {} | to_entries[] | .value')
 
   dockerfile=$(mktemp)
   echo "==> Generating Dockerfile"
@@ -99,7 +119,7 @@ run_docker() {
 
   # Parse env vars from config
   local env_args=()
-  mapfile -t env_entries < <(echo "$config" | jq -r '.env | to_entries[] | "\(.key)=\(.value)"')
+  mapfile -t env_entries < <(echo "$config" | jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"')
   for e in "${env_entries[@]}"; do
     env_args+=(-e "$e")
   done
@@ -125,12 +145,12 @@ run_docker() {
     fi
   fi
 
-  local tty_flag=''
+  local run_args=(--rm -i)
   if echo "$config" | jq -e '.interactive' >/dev/null 2>&1; then
-    tty_flag='-t'
+    run_args+=(-t)
   fi
 
-  docker run --rm -i $tty_flag \
+  docker run "${run_args[@]}" \
     -u "$(id -u):$(id -g)" \
     -v "$src:$workdir" \
     "${vol_args[@]}" \
@@ -143,7 +163,7 @@ run_docker() {
   echo "$new_image_id" > "$fp_file"
   
   if [[ ${#artifacts[@]} -gt 0 ]]; then
-    copy_artifacts "$src" $artifacts
+    copy_artifacts "$src" "${artifacts[@]}"
   fi
 
 }
@@ -220,7 +240,7 @@ run_agent() {
     fi
   done
 
-  clear
+  [[ -t 1 ]] && clear
 
   docker run -it --rm --init \
     --name "$tag-agent" \
@@ -249,12 +269,60 @@ run_action() {
 	esac
 }
 
+run_list() {
+  local has_agent=''
+  if jq -e 'has("agent")' "$PROJECT_FILE" >/dev/null 2>&1; then
+    has_agent=1
+  fi
+
+  # Collect all rows into arrays for aligned formatting
+  local names=() descs=()
+
+  if [[ -n "$has_agent" ]]; then
+    names+=("agent")
+    descs+=("AI dev agent")
+  fi
+
+  local action_names
+  mapfile -t action_names < <(jq -r '.actions | keys[]' "$PROJECT_FILE")
+  for a in "${action_names[@]}"; do
+    local desc=''
+    desc=$(jq -r ".actions[\"$a\"].description // empty" "$PROJECT_FILE")
+    if [[ -z "$desc" ]]; then
+      local atype
+      atype=$(jq -r ".actions[\"$a\"].type" "$PROJECT_FILE")
+      desc="[${atype}]"
+    fi
+    names+=("$a")
+    descs+=("$desc")
+  done
+
+  # Find max name length for alignment
+  local max_len=0
+  for n in "${names[@]}"; do
+    if [[ ${#n} -gt $max_len ]]; then
+      max_len=${#n}
+    fi
+  done
+
+  local B='\033[1m' R='\033[0m'
+
+  echo -e "${B}${name}${R}"
+  echo ""
+  for i in "${!names[@]}"; do
+    printf "  ${B}%-${max_len}s${R}   %s\n" "${names[$i]}" "${descs[$i]}"
+  done
+}
+
 # Dispatch
-if [[ "$action" == "agent" ]] && jq -e 'has("agent")' "$PROJECT_FILE" >/dev/null; then
+if [[ "$action" == "list" ]]; then
+	run_list
+elif [[ "$action" == "agent" ]] && jq -e 'has("agent")' "$PROJECT_FILE" >/dev/null; then
 	run_agent
 elif jq -e ".actions | has(\"$action\")" "$PROJECT_FILE" >/dev/null; then
 	run_action "$action"
 else
 	echo "Action '$action' not found"
+	echo "Run '$0 list' to see available actions."
 	exit 1
 fi

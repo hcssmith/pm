@@ -12,6 +12,7 @@
   "actions": {
     "build": {
       "type":"native",
+      "description": "Native echo test",
       "steps": [
         "echo test",
         "ls"
@@ -22,6 +23,7 @@
     },
     "docker-build": {
       "type": "docker",
+      "description": "Build Go binary",
       "image": "golang:1.25.7",
       "workdir": "/src",
       "steps": [
@@ -43,6 +45,7 @@
     },
     "develop": {
       "type": "docker",
+      "description": "Interactive Go dev shell",
       "image": "golang:1.25.7",
       "workdir": "/src",
       "steps": [
